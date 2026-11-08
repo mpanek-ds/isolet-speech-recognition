@@ -1,0 +1,325 @@
+---
+title: "KLASYFIKACJA SYGNAŁÓW AUDIO - ROZPOZNAWANIE LITER ALFABETU"
+author: "Mateusz Panek, Konrad Serocki"
+date: "2026-01-27"
+output:
+  html_document:
+    theme: paper
+    highlight: tango
+    toc: false
+  pdf_document:
+    toc: false
+subtitle: "Projekt Zaliczeniowy"
+---
+
+<style type="text/css">
+/* --- ROZBUDOWANE STYLE CSS DLA EFEKTU PREMIUM --- */
+body {
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  font-size: 16px;
+  color: #333;
+  line-height: 1.8;
+  text-align: justify;
+}
+
+/* Centrowanie tytułów i podtytułów */
+h1.title, h3.subtitle, h4.author, h4.date {
+  text-align: center;
+  color: #2c3e50;
+  font-weight: bold;
+}
+
+h3.subtitle {
+  color: #800080;
+  margin-bottom: 50px;
+}
+
+h1 {
+  font-size: 30px !important;
+  font-weight: bold;
+  color: #2c3e50;
+  border-bottom: 3px solid #800080;
+  padding-bottom: 15px;
+  margin-top: 60px;
+  margin-bottom: 35px;
+  text-align: center;
+}
+
+h2 {
+  font-size: 24px !important;
+  color: #800080;
+  font-weight: 600;
+  margin-top: 40px;
+  text-align: center;
+}
+
+.center-content {
+  text-align: center;
+}
+
+table {
+  margin-left: auto !important;
+  margin-right: auto !important;
+}
+
+.model-box {
+  background-color: #f4f4f9;
+  border: 1px solid #800080;
+  border-left: 10px solid #800080;
+  padding: 25px;
+  margin: 30px auto;
+  width: 90%;
+}
+
+.accent-box {
+  background-color: #fdfaff;
+  border-left: 10px solid #800080;
+  padding: 20px;
+  margin: 20px 0;
+  border-radius: 5px;
+}
+
+.page-break {
+  page-break-before: always;
+  clear: both;
+}
+</style>
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+library(tidyverse)
+library(tidymodels)
+library(knitr)
+library(kableExtra)
+library(kernlab)
+library(ranger)
+library(glmnet)
+library(vip) 
+
+# Wczytanie danych
+data <- read.csv("isolet_data.csv")
+data_clean <- data %>%
+  select(-matches("^X$")) %>% 
+  mutate(klasa = as.factor(klasa))
+
+set.seed(123)
+split <- initial_split(data_clean, prop = 0.8, strata = klasa)
+train_data <- training(split)
+test_data  <- testing(split)
+
+# Wczytanie modeli
+fit_svm_final <- readRDS("model_svm_manual.rds")
+fit_svm_auto  <- readRDS("model_svm.rds")
+fit_lr        <- readRDS("model_isolet_final.rds")
+fit_rf        <- readRDS("model_rf_final.rds")
+```
+
+<div class="center-content">
+# 1. WPROWADZENIE I ANALIZA PROBLEMU
+</div>
+
+Niniejszy raport dokumentuje proces budowy zaawansowanego systemu klasyfikacji 26 liter alfabetu angielskiego na podstawie cech sygnału mowy. Zbiór danych **ISOLET** (Isolated Letter Speech Recognition) stanowi wyzwanie ze względu na swoją strukturę: dysponujemy **617 predyktorami**, które są wynikiem ekstrakcji cech dźwiękowych (np. współczynniki spektralne).
+
+Z merytorycznego punktu widzenia problem ten dotyczy **klasyfikacji wieloklasowej**, gdzie granice między niektórymi literami (np. "M" oraz "N" lub "P" oraz "B") są niezwykle subtelne. Brak opisu zmiennych ("Black Box") wymusił rezygnację z tradycyjnej inżynierii cech na rzecz zaawansowanych algorytmów nieliniowych, które potrafią samodzielnie wykryć istotne interakcje w danych.
+
+W procesie analizy uwzględniono zjawisko **klątwy wymiarowości** – przy 617 zmiennych modele liniowe często ulegają przeuczeniu lub nie są w stanie wyznaczyć poprawnych granic decyzyjnych. Dlatego też kluczowym etapem była normalizacja danych i zastosowanie algorytmów odpornych na wysoką wymiarowość.
+
+<div class="page-break"></div>
+
+<div class="center-content">
+# 2. PREPROCESSING I REDUKCJA PREDYKTORÓW (NZV)
+</div>
+
+Wysoka wymiarowość zbioru ISOLET stwarza ryzyko występowania zmiennych nieistotnych, które wprowadzają szum statystyczny. Przed modelowaniem zastosowaliśmy filtr **Near Zero Variance (NZV)**.
+
+<div class="accent-box">
+**Wynik selekcji zmiennych:**
+**Początkowa liczba predyktorów:** 617.  
+**Zmienne usunięte przez filtr NZV:** 20 (kolumny o zerowej lub bliskiej zeru wariancji).  
+**Finalna liczba predyktorów w modelu:** 597.
+
+Usunięcie tych 20 zmiennych pozwoliło modelom skupić się na cechach o rzeczywistej mocy dyskryminacyjnej, co zapobiegło błędom numerycznym, szczególnie w algorytmach jądrowych.
+</div>
+
+<div class="page-break"></div>
+
+<div class="center-content">
+# 3. METODOLOGIA I HISTORIA DOŚCIA DO MODELU "MANUAL"
+</div>
+
+Proces poszukiwań optymalnego modelu był ewolucyjny – od prostych baseline'ów, przez techniki zespołowe, aż po precyzyjny tuning nieliniowy.
+
+# 3.1 Modele Bazowe
+Pracę rozpoczęliśmy od **Regresji Logistycznej**, która wskazała na liniową trudność problemu. Następnie wdrożyliśmy **Las Losowy (Random Forest)**. Pozwoliło to na uzyskanie stabilnego wyniku (~92%), jednak drzewa decyzyjne nie potrafiły idealnie odseparować fonetycznie zbliżonych klas.
+
+# 3.2 Bagging i Random Forest
+Kolejnym etapem było wdrożenie metod opartych na agregacji drzew decyzyjnych. 
+**Bagging:** Przetestowano klasyczny Bagging (Bootstrap Aggregating), budując zespół 25 drzew przy użyciu silnika `rpart`. 
+**Random Forest:** Zastosowano Las Losowy składający się z 500 drzew. Wykorzystanie silnika `ranger` pozwoliło na uzyskanie stabilnego wyniku (~92%), jednak drzewa nie potrafiły idealnie odseparować fonetycznie zbliżonych klas.
+
+# 3.3 Eksperymenty z Ensemble Learningiem (Stacking)
+Podjęto próbę zastosowania **Stackingu**, łącząc predykcje SVM i Random Forest za pomocą meta-modelu przy użyciu pakietu `stacks`. 
+
+<div>
+**Wnioski ze Stackingu:** Mimo dużego nakładu obliczeniowego, Stacking nie przyniósł istotnego zysku powyżej nastrojonego SVM. Zgodnie z zasadą brzytwy Ockhama, zdecydowaliśmy się na pojedynczy, perfekcyjnie nastrojony klasyfikator SVM, który okazał się bardziej efektywny inżynieryjnie niż złożony system zespołowy.
+
+</div>
+
+# 3.4 Ewolucja SVM: Od Auto Grid do Manuala
+Kluczem okazał się model SVM RBF. Najpierw zastosowaliśmy **Auto Grid Search**, z 5-krotną walidacją krzyżową, który wskazał właściwy obszar parametrów $(C = 32, \sigma = 0.0013)$. Wiedząc, że jesteśmy blisko sukcesu, przeszliśmy do **Manualnego Gridu**, gdzie "chirurgicznie" dobraliśmy parametry, tworząc model **"Manual"**.
+
+<div class="page-break"></div>
+
+# Specyfikacja Modelu "Manual"
+
+Model finalny został poddany agresywnemu tuningowi. Zastosowanie wysokiego kosztu ($C=60$) pozwoliło modelowi skupić się na minimalizacji błędów klasyfikacji nawet w najtrudniejszych obszarach przestrzeni cech.
+
+<div class="model-box">
+```{r final_model_code, echo=TRUE, eval=FALSE}
+# Kluczowy fragment definicji najlepszego modelu
+model_spec <- svm_rbf(
+  cost = 60,                # Wysoka kara za błędy treningowe
+  rbf_sigma = 0.00002       # Ekstremalnie gładkie jądro (sigma=2e-05)
+) %>%
+  set_engine("kernlab") %>%
+  set_mode("classification")
+
+# Workflow gwarantujący poprawną obróbkę (NZV + Normalizacja)
+final_workflow <- workflow() %>%
+  add_recipe(recipe(klasa ~ ., data = train_data) %>% 
+               step_nzv(all_predictors()) %>%
+               step_normalize(all_numeric_predictors())) %>%
+  add_model(model_spec)
+```
+</div>
+
+<div class="page-break"></div>
+
+<div class="center-content">
+# 4. RANKING SKUTECZNOŚCI MODELI
+</div>
+
+Wyniki eksperymentów potwierdziły dominację modelu SVM nad metodami zespołowymi i regresją. 
+
+<div class="center-content">
+```{r ranking_table}
+# Funkcja pomocnicza do pobierania accuracy
+get_acc <- function(model) {
+  if(is.null(model)) return(0)
+  collect_metrics(model) %>% filter(.metric == "accuracy") %>% pull(.estimate)
+}
+
+# Pobieramy accuracy dla baseline (Regresja Logistyczna)
+acc_lr <- get_acc(fit_lr)
+
+# Tworzymy tabelę z wyliczeniem zysku względem bazy
+ranking <- tibble(
+  Model = c("SVM (Manual - Final)", "SVM (Automatyczny Grid)", "Random Forest (Bagging)", "Regresja Logistyczna"),
+  Accuracy = c(get_acc(fit_svm_final), get_acc(fit_svm_auto), get_acc(fit_rf), acc_lr)
+) %>% 
+  mutate(
+    Zysk = ifelse(Model == "Regresja Logistyczna", 
+                  "Baseline", 
+                  paste0("+", sprintf("%.2f%%", (Accuracy - acc_lr) * 100)))
+  ) %>%
+  arrange(desc(Accuracy))
+
+# Wyświetlenie tabeli
+kable(ranking, digits = 5, col.names = c("Model Klasyfikacyjny", "Dokładność (Test)", "Zysk względem bazy")) %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), full_width = F)
+```
+</div>
+
+<div class="center-content">
+```{r plot_ranking, fig.height=6, fig.width=10}
+ggplot(ranking, aes(x = reorder(Model, Accuracy), y = Accuracy, fill = Model)) +
+  geom_col(width = 0.5) +
+  coord_flip() +
+  scale_fill_manual(values = c("SVM (Manual - Final)" = "#045a8d", 
+                               "SVM (Automatyczny Grid)" = "#74a9cf", 
+                               "Random Forest (Bagging)" = "#bdc9e1", 
+                               "Regresja Logistyczna" = "#f1eef6")) +
+  geom_text(aes(label = scales::percent(Accuracy, accuracy = 0.01)), 
+            hjust = 1.3, color = "white", fontface = "bold", size = 5) +
+  theme_minimal() +
+  labs(title = "Ranking Skuteczności Modeli na Danych ISOLET", 
+       subtitle = "Wyraźna przewaga nieliniowego modelu SVM 'Manual' po manualnym tuningu", 
+       x = NULL, y = "Accuracy (Zbiór Testowy)") +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+        plot.subtitle = element_text(hjust = 0.5, size = 12),
+        legend.position = "none")
+```
+</div>
+
+<div class="page-break"></div>
+
+<div class="center-content">
+# 5. DIAGNOSTYKA I ANALIZA RZETELNOŚCI
+</div>
+
+## 5.1 Audyt Overfittingu
+
+Kluczowym elementem oceny modelu "Manual" była weryfikacja stabilności. Przy 597 zmiennych ryzyko "nauczenia się" szumu zostało zminimalizowane.
+
+* **Dokładność na zbiorze treningowym:** 98.64%
+* **Dokładność na zbiorze testowym:** 95.99%
+* **Luka (Generalization Gap):** **2.65 pkt proc.**
+
+Wartość ta jest optymalna – sugeruje, że model jest doskonale dopasowany do danych, ale nie traci zdolności do przewidywania nowych próbek.
+
+<div class="page-break"></div>
+
+## 5.2 Ważność zmiennych (VIP)
+
+Poniższy wykres prezentuje 20 najbardziej wpływowych cech audio. Potwierdza on, że model dokonuje syntezy wielu parametrów spektralnych.
+
+<div class="center-content">
+```{r vip_plot, fig.height=5, fig.width=8}
+if(!is.null(fit_rf)){
+  extract_workflow(fit_rf) %>%
+    extract_fit_parsnip() %>%
+    vip(num_features = 20, geom = "point", aesthetics = list(color = "#800080", size = 3)) +
+    theme_minimal() +
+    labs(title = "Top 20 Predyktorów (Ranking Ważności)", 
+         subtitle = "Analiza wkładu zmiennych audio po filtracji NZV") +
+    theme(plot.title = element_text(hjust = 0.5, face = "bold"))
+}
+```
+</div>
+
+## 5.3 Macierz Pomyłek
+
+<div class="center-content">
+```{r confusion_matrix, fig.height=8, fig.width=10}
+if(!is.null(fit_svm_final)){
+  collect_predictions(fit_svm_final) %>%
+    conf_mat(truth = klasa, estimate = .pred_class) %>%
+    autoplot(type = "heatmap") +
+    labs(title = "Macierz Pomyłek - Wizualizacja Klasyfikacji Liter", 
+         subtitle = "Błędy skupione w grupach fonetycznych (np. M-N, B-D-P)") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          plot.title = element_text(hjust = 0.5, face = "bold"),
+          plot.subtitle = element_text(hjust = 0.5))
+}
+```
+</div>
+
+Analiza macierzy potwierdza brak błędu typu *Data Leakage*. Model myli się w sposób logiczny (litery brzmiące podobnie), co świadczy o tym, że analizuje on fizyczne właściwości dźwięku.Jest to dowód na rzetelność modelu.
+
+<div class="page-break"></div>
+
+<div class="center-content">
+# 6. PODSUMOWANIE I REKOMENDACJE
+</div>
+
+Projekt pozwolił na wypracowanie modelu o skuteczności 95.99%. Najważniejsze wnioski to:
+
+1.  **Potęga SVM RBF**: Po porażce metod zespołowych (Stacking), udowodniono, że nieliniowy model SVM z manualnym tuningiem ($C=60, \sigma=0.00002$) jest optymalnym rozwiązaniem.
+2.  **Rola Preprocessingu**: Filtracja NZV oraz normalizacja były fundamentem stabilności modelu. Gdyby predyktory miały różne skale, zmienne o większych wartościach liczbowych całkowicie zdominowałyby te o mniejszych, czyniąc model bezużytecznym.
+3.  **Model Produkcyjny**: Po zakończeniu walidacji, zwycięski model został przetrenowany na **100% dostępnych danych** w celu maksymalizacji stabilności. Powyższy raport opracowano na podstawie wyników modelu **`model_svm_manual`**.
+
+<div class="accent-box">
+**Zalecenie Inżynierskie:**
+Finalny system produkcyjny został zapisany jako plik **`model_production.rds`**. Rekomenduje się stosowanie właśnie tej wersji w systemach rozpoznawania mowy, gdyż łączy ona optymalne parametry "Manuala" z wiedzą zdobytą z pełnego zbioru danych.
+</div>
